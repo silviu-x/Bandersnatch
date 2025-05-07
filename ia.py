@@ -1,203 +1,286 @@
-import requests
+import pygame
+import sys
+import subprocess
+import random
 
-class Scelta:
-    def __init__(self, testo, scena_destinazione=None, effetto=None, usa_llm=False, personaggio=None, contesto=None):
-        self.testo = testo
-        self.scena_destinazione = scena_destinazione
-        self.effetto = effetto
-        self.usa_llm = usa_llm
-        self.personaggio = personaggio
-        self.contesto = contesto
+# --- Settings ---
+TILE = 32
+W, H = 640, 480
+FPS = 60
 
-class Scena:
-    def __init__(self, nome, descrizione):
-        self.nome = nome
-        self.descrizione = descrizione
-        self.scelte = []
+# --- Narrative classes ---
+class SceneNode:
+    def __init__(self, text, choices=None, effect=None):
+        self.text = text
+        self.choices = choices or []       # list of (label, node_key)
+        self.effect = effect               # callable to generate dynamic text
 
-    def aggiungi_scelta(self, scelta):
-        self.scelte.append(scelta)
-
-    def mostra(self):
-        print(f"\n[{self.nome.upper()}]\n{self.descrizione}\n")
-        for i, scelta in enumerate(self.scelte):
-            print(f"{i+1}. {scelta.testo}")
-
-class Giocatore:
-    def __init__(self, nome):
-        self.nome = nome
-        self.lucidita = 100
-        self.inventario = []
-        self.storia_scelte = []
-
-    def aggiorna_lucidita(self, delta):
-        self.lucidita = max(0, min(100, self.lucidita + delta))
-
-    def aggiungi_oggetto(self, oggetto):
-        if oggetto not in self.inventario:
-            self.inventario.append(oggetto)
-
-    def registra_scelta(self, scena):
-        self.storia_scelte.append(scena)
-
-# Funzione per parlare con l'IA
-
-def dialoga_con_llm(nome_pg, contesto, messaggio, modello="llama3.2"):
-    prompt = f"""
-    Sei il personaggio {nome_pg} in un gioco testuale.
-    Contesto: {contesto}
-    Il giocatore dice: "{messaggio}"
-    Rispondi in tono coerente con il tuo ruolo.
-    """
-    res = requests.post(
-        "http://localhost:11434/api/generate",
-        json={"model": modello, "prompt": prompt, "stream": False}
+# Build narrative graph with AI effects on 'padre' and 'colin'
+def build_story():
+    s = {}
+    s['risveglio'] = SceneNode(
+        "Ti svegli. Cosa fai?",
+        [('Vai in ufficio', 'ufficio_setup'), ('Rimani a casa', 'casa')]
     )
-    return res.json()["response"].strip()
+    s['ufficio'] = SceneNode(
+        "Sei in ufficio da TuckerSoft.",
+        [('Accetta il contratto', 'finale1'), ("Rifiuta l'offerta", 'rifuto_offerta')]
+    )
+    s['casa'] = SceneNode(
+        "Sei a casa.",
+        [('Parla con il padre', 'padre'), ('Taci', 'sogni')]
+    )
+    # Transition nodes
+    s['ufficio_setup'] = SceneNode("")
+    s['tetto_setup'] = SceneNode("")
+    s['rifuto_offerta'] = SceneNode("Torna a casa per lavorare in autonomia.", [('Continua', 'ritorno_casa')])
+    # Father scene uses AI
+    s['padre'] = SceneNode(
+        "",
+        [('Ricordi distorti sulla madre', 'ricordi'), ('Appare la voce: Distruggi il computer', 'distruggi')],
+        effect=lambda: get_npc_response("Il giocatore incontra Padre. Cosa dice l'NPC?")
+    )
+    s['ricordi'] = SceneNode("I ricordi sulla madre sono distorti.", [('Prosegui', 'ritorno')])
+    s['distruggi'] = SceneNode("Una voce ti ordina: Distruggi il computer.", [('Distruggi', 'finale5')])
+    s['sogni'] = SceneNode("Inizi a sognare incubi ricorrenti.", [('Continua', 'ritorno')])
+    s['ritorno'] = SceneNode("Il codice si modifica da solo e il libro cambia.", [('Prosegui', 'colin')])
+    s['ritorno_casa'] = SceneNode("Sei di nuovo a casa.", [('Prosegui', 'colin')])
+    # Colin scene uses AI
+    s['colin'] = SceneNode(
+        "",
+        [('Segui Colin sul tetto', 'tetto_setup'), ('Non lo segui', 'gioco')],
+        effect=lambda: get_npc_response("Il giocatore incontra Colin. Cosa dice l'NPC?")
+    )
+    s['tetto'] = SceneNode(
+        "Sei sul tetto con Colin.",
+        [('Salta tu', 'finale2'), ('Salto io', 'salto')]
+    )
+    s['salto'] = SceneNode("Colin sparisce, realtà alterata.", [('Continua', 'controllo')])
+    s['gioco'] = SceneNode("Il gioco prende controllo della tastiera.", [('Resisti', 'controllo')])
+    s['controllo'] = SceneNode("Sei osservato da Netflix/Futura.", [('Accetta la verità', 'consapevolezza')])
+    s['consapevolezza'] = SceneNode(
+        "Capisci di essere in un gioco.",
+        [('Uccidi il padre', 'finale3'), ('Completa il gioco', 'finale4')]
+    )
+    # finali (no choices)
+    for key, text in [('finale1', 'Finale: Fallimento commerciale.'),
+                      ('finale2', 'Finale: Loop mentale.'),
+                      ('finale3', 'Finale: Omicidio del padre.'),
+                      ('finale4', 'Finale: Libertà ottenuta.'),
+                      ('finale5', 'Finale segreto: Consapevolezza.')]:
+        s[key] = SceneNode(text)
+    return s
 
-def gioca(mappa_scene, scena_iniziale, giocatore):
-    scena_corrente = mappa_scene[scena_iniziale]
+# Function to interact with Ollama (LLaMA 3.2)
+def get_npc_response(prompt):
+    try:
+        result = subprocess.run(
+            ["ollama", "generate", "--model", "llama3.2", "--prompt", prompt],
+            capture_output=True, text=True
+        )
+        if result.returncode == 0:
+            return result.stdout.strip()
+    except Exception as e:
+        print(f"Error communicating with Ollama: {e}")
+    return "Non riesco a rispondere al momento."
 
-    while True:
-        giocatore.registra_scelta(scena_corrente.nome)
-        print(f"\nLucidità mentale: {giocatore.lucidita}/100")
-        scena_corrente.mostra()
+# NPC class unchanged
+class NPC:
+    def __init__(self, name, img, x, y, roam_rect=None):
+        self.name = name
+        self.img = img
+        self.rect = pygame.Rect(x, y, TILE, TILE)
+        self.roam = roam_rect
+        self.cooldown = 0
+    def update(self, walls):
+        if self.cooldown > 0:
+            self.cooldown -= 1
+            return
+        if self.roam and random.random() < 0.02:
+            dx, dy = random.choice([(TILE,0),(-TILE,0),(0,TILE),(0,-TILE),(0,0)])
+            newpos = self.rect.move(dx, dy)
+            if self.roam.contains(newpos) and not any(newpos.colliderect(w) for w in walls):
+                self.rect = newpos
+                self.cooldown = 20
+    def draw(self, surf):
+        surf.blit(self.img, self.rect.topleft)
+    def try_talk(self, player_rect):
+        if self.rect.colliderect(player_rect):
+            return get_npc_response(f"Il giocatore incontra {self.name}. Cosa dice l'NPC?")
+        return None
 
-        if not scena_corrente.scelte:
-            print("\nFine del gioco.")
-            break
+# Map builders unchanged
+# ... (load_house, load_office, load_rooftop)
 
-        try:
-            scelta = int(input("\nScegli un'opzione: ")) - 1
-            scelta_attuale = scena_corrente.scelte[scelta]
-
-            if scelta_attuale.usa_llm:
-                domanda = input(f"\nParla con {scelta_attuale.personaggio}: ")
-                risposta = dialoga_con_llm(
-                    nome_pg=scelta_attuale.personaggio,
-                    contesto=scelta_attuale.contesto,
-                    messaggio=domanda
-                )
-                print(f"\n{scelta_attuale.personaggio.upper()}: {risposta}")
-
-            if scelta_attuale.effetto == "finale":
-                print("\nHai raggiunto un finale: " + scelta_attuale.testo)
-                break
-            if scelta_attuale.effetto == "lucidita--":
-                giocatore.aggiorna_lucidita(-20)
-                print("\nLa tua lucidità mentale diminuisce...")
-            if scelta_attuale.effetto == "lucidita++":
-                giocatore.aggiorna_lucidita(10)
-                print("\nTi senti più lucido...")
-
-            scena_corrente = mappa_scene[scelta_attuale.scena_destinazione]
-        except (ValueError, IndexError):
-            print("Scelta non valida. Riprova.")
-
-def crea_mappa_scene():
-    # Scene principali
-    risveglio = Scena("risveglio", "Ti svegli. Una strana inquietudine ti attraversa.")
-    ufficio = Scena("ufficio", "Arrivi da Tuckersoft. Ti offrono un contratto.")
-    fallimento = Scena("fallimento", "Accetti il contratto. Il gioco fallisce miseramente.")
-    autonomia = Scena("autonomia", "Rifiuti l'offerta e torni a casa per lavorare da solo.")
-    casa = Scena("casa", "Resti a casa. Il silenzio è opprimente.")
-    padre = Scena("padre", "Parli con tuo padre. I ricordi sulla mamma sono confusi.")
-    voce = Scena("voce", "Una voce sussurra: 'Distruggi il computer'.")
-    sogni = Scena("sogni", "Incubi continui ti trascinano verso la follia.")
-    ritorno_casa = Scena("ritorno_casa", "Il codice si modifica da solo. Bandersnatch cambia ogni volta che lo leggi.")
-    chiamata_colin = Scena("chiamata_colin", "Colin ti chiama. Vuole parlarti.")
-    tetto = Scena("tetto", "Siete sul tetto. Colin ti fissa intensamente.")
-    salto_tu = Scena("salto_tu", "Colin salta. Ti ritrovi intrappolato in un loop.")
-    salto_io = Scena("salto_io", "Salti. La realtà cambia. Colin sparisce.")
-    gioco_controlla = Scena("gioco_controlla", "Non hai seguito Colin. La tastiera scrive da sola.")
-    controllo_esterno = Scena("controllo_esterno", "Scopri che sei osservato da Netflix o Futura.")
-    consapevolezza = Scena("consapevolezza", "Ti rendi conto di essere dentro un gioco.")
-
-    # Finali
-    finale_commerciale = Scena("finale_commerciale", "Finale: Fallimento commerciale.")
-    finale_loop = Scena("finale_loop", "Finale: Intrappolato in un loop mentale.")
-    finale_omicidio = Scena("finale_omicidio", "Finale: Uccidi tuo padre.")
-    finale_liberta = Scena("finale_liberta", "Finale: Completi Bandersnatch e ti liberi.")
-    finale_segreto = Scena("finale_segreto", "Finale segreto: Consapevolezza metanarrativa.")
-
-    # Collegamenti
-    risveglio.aggiungi_scelta(Scelta("Vai in ufficio", "ufficio"))
-    risveglio.aggiungi_scelta(Scelta("Rimani a casa", "casa"))
-
-    ufficio.aggiungi_scelta(Scelta("Accetta il contratto", "fallimento", effetto="finale"))
-    ufficio.aggiungi_scelta(Scelta("Rifiuta l'offerta", "autonomia"))
-
-    casa.aggiungi_scelta(Scelta("Parla con tuo padre", "padre"))
-    casa.aggiungi_scelta(Scelta("Taci", "sogni", effetto="lucidita--"))
-
-    padre.aggiungi_scelta(Scelta("Ascolta la voce", "voce", effetto="lucidita--"))
-    voce.aggiungi_scelta(Scelta("Distruggi il computer", "finale_segreto", effetto="finale"))
-
-    sogni.aggiungi_scelta(Scelta("Resisti agli incubi", "ritorno_casa", effetto="lucidita--"))
-
-    autonomia.aggiungi_scelta(Scelta("Continua a programmare", "ritorno_casa"))
-
-    ritorno_casa.aggiungi_scelta(Scelta("Rispondi a Colin", "chiamata_colin"))
-
-    chiamata_colin.aggiungi_scelta(Scelta("Parla con Colin", "tetto", usa_llm=True, personaggio="Colin", contesto="Sei sul tetto. Colin parla del libero arbitrio e del multiverso."))
-    chiamata_colin.aggiungi_scelta(Scelta("Ignora la chiamata", "gioco_controlla", effetto="lucidita--"))
-
-    tetto.aggiungi_scelta(Scelta("Salta tu", "salto_tu", effetto="finale"))
-    tetto.aggiungi_scelta(Scelta("Salto io", "salto_io"))
-
-    salto_io.aggiungi_scelta(Scelta("Indaga", "controllo_esterno"))
-    gioco_controlla.aggiungi_scelta(Scelta("Lotta per il controllo", "controllo_esterno"))
-
-    controllo_esterno.aggiungi_scelta(Scelta("Accetta", "consapevolezza"))
-
-    consapevolezza.aggiungi_scelta(Scelta("Uccidi tuo padre", "finale_omicidio", effetto="finale"))
-    consapevolezza.aggiungi_scelta(Scelta("Completa Bandersnatch", "finale_liberta", effetto="finale"))
-
-    return {
-        "risveglio": risveglio,
-        "ufficio": ufficio,
-        "fallimento": fallimento,
-        "autonomia": autonomia,
-        "casa": casa,
-        "padre": padre,
-        "voce": voce,
-        "sogni": sogni,
-        "ritorno_casa": ritorno_casa,
-        "chiamata_colin": chiamata_colin,
-        "tetto": tetto,
-        "salto_tu": salto_tu,
-        "salto_io": salto_io,
-        "gioco_controlla": gioco_controlla,
-        "controllo_esterno": controllo_esterno,
-        "consapevolezza": consapevolezza,
-        "finale_commerciale": finale_commerciale,
-        "finale_loop": finale_loop,
-        "finale_omicidio": finale_omicidio,
-        "finale_liberta": finale_liberta,
-        "finale_segreto": finale_segreto
+def load_house():
+    walls = []
+    houses = [(5,3,4,3), (12,8,3,4)]
+    for hx, hy, hw, hh in houses:
+        for i in range(hw):
+            for j in range(hh):
+                walls.append(pygame.Rect((hx+i)*TILE,(hy+j)*TILE,TILE,TILE))
+    triggers = {
+        'risveglio': pygame.Rect(3*TILE,2*TILE,TILE,TILE),
+        'padre':     pygame.Rect(4*TILE,10*TILE,TILE,TILE),
+        'colin':     pygame.Rect(6*TILE,8*TILE,TILE,TILE),
     }
+    return walls, triggers
 
-def main():
-    print("""
-            BANDERSNATCH EDITION
-    Un gioco testuale ispirato a Black Mirror
+def load_office():
+    walls = []
+    desks = [(3,3,1,2),(6,2,2,1),(10,4,3,1)]
+    for dx, dy, dw, dh in desks:
+        for i in range(dw):
+            for j in range(dh):
+                walls.append(pygame.Rect((dx+i)*TILE,(dy+j)*TILE,TILE,TILE))
+    triggers = {'ufficio': pygame.Rect(8*TILE,2*TILE,TILE,TILE)}
+    return walls, triggers
 
-    Anno 1984. Sei uno sviluppatore che sta creando
-    un gioco basato su un libro maledetto...
-    """)
+def load_rooftop():
+    walls = []
+    for i in range(0, W, TILE):
+        walls.append(pygame.Rect(i,0,TILE,TILE))
+        walls.append(pygame.Rect(i,5*TILE,TILE,TILE))
+    for j in range(0, 6*TILE, TILE):
+        walls.append(pygame.Rect(0,j,TILE,TILE))
+        walls.append(pygame.Rect(10*TILE,j,TILE,TILE))
+    triggers = {'tetto': pygame.Rect(5*TILE,5*TILE,TILE,TILE)}
+    return walls, triggers
 
-    nome_giocatore = input("Come ti chiami, sviluppatore? ")
-    giocatore = Giocatore(nome_giocatore)
-    mappa_scene = crea_mappa_scene()
+# Pygame setup
+pygame.init()
+screen = pygame.display.set_mode((W,H))
+clock = pygame.time.Clock()
+FONT = pygame.font.SysFont(None, 24)
 
-    print("\nLa tua avventura sta per iniziare...")
-    gioca(mappa_scene, "risveglio", giocatore)
+player_img = pygame.transform.scale(pygame.image.load('player.png'), (TILE,TILE))
+wall_img   = pygame.transform.scale(pygame.image.load('house.png'), (TILE,TILE))
+npc_img    = pygame.transform.scale(pygame.image.load('npc.png'), (TILE,TILE))
 
-    print("\nIl tuo percorso:")
-    for i, scena in enumerate(giocatore.storia_scelte):
-        print(f"{i+1}. {scena}")
+def setup_npcs(map_name):
+    npcs = []
+    if map_name == 'house': npcs.append(NPC("Padre", npc_img, 4*TILE,10*TILE))
+    elif map_name == 'roof': npcs.append(NPC("Colin", npc_img, 5*TILE,5*TILE))
+    return npcs
 
-    print("\nGrazie per aver giocato!")
+# State and history
+story = build_story()
+mode = 'world'
+current_scene = None
+current_map = 'house'
+walls, triggers = load_house()
+npcs = setup_npcs(current_map)
+player = pygame.Rect(2*TILE,2*TILE,TILE,TILE)
+history = []
 
-if __name__ == "__main__":
-    main()
+# Drawing functions
+def draw_scene_text(scene_key):
+    global current_scene, mode, current_map, walls, triggers, npcs
+    # Transitions
+    if scene_key == 'ufficio_setup':
+        current_map = 'office'
+        walls, triggers = load_office()
+        npcs = setup_npcs(current_map)
+        scene_key = 'ufficio'
+    elif scene_key == 'tetto_setup':
+        current_map = 'roof'
+        walls, triggers = load_rooftop()
+        npcs = setup_npcs(current_map)
+        scene_key = 'tetto'
+    elif scene_key == 'rifuto_offerta':
+        current_map = 'house'
+        walls, triggers = load_house()
+        npcs = setup_npcs(current_map)
+        scene_key = 'rifuto_offerta'
+    # Set scene & history
+    current_scene = scene_key
+    history.append(scene_key)
+    # AI effect
+    node = story[current_scene]
+    if node.effect:
+        node.text = node.effect()
+    # Finale detection
+    if current_scene.startswith('finale'):
+        mode = 'finale'
+    else:
+        mode = 'narrative'
+
+
+def draw_text_box():
+    s = story[current_scene]
+    box = pygame.Surface((W, 200)); box.set_alpha(220); box.fill((0,0,0))
+    screen.blit(box, (0, H-200))
+    words = s.text.split(' ')
+    lines, cur = [], ''
+    for w in words:
+        test = f"{cur} {w}".strip()
+        if FONT.size(test)[0] < W-40: cur = test
+        else:
+            lines.append(cur)
+            cur = w
+    if cur: lines.append(cur)
+    for i, line in enumerate(lines):
+        screen.blit(FONT.render(line, True, (255,255,255)), (20, H-180 + i*30))
+    for i, (lbl, _) in enumerate(s.choices):
+        screen.blit(FONT.render(f"{i+1}. {lbl}", True, (200,200,100)), (40, H-100 + i*30))
+
+# Main loop
+running = True
+while running:
+    for e in pygame.event.get():
+        if e.type == pygame.QUIT:
+            running = False
+        if mode == 'world' and e.type == pygame.KEYDOWN:
+            dx = (e.key==pygame.K_RIGHT and TILE) - (e.key==pygame.K_LEFT and TILE)
+            dy = (e.key==pygame.K_DOWN and TILE) - (e.key==pygame.K_UP and TILE)
+            if dx or dy:
+                newp = player.move(dx, dy)
+                if not any(newp.colliderect(w) for w in walls): player = newp
+            if e.key == pygame.K_SPACE:
+                talked = False
+                for npc in npcs:
+                    resp = npc.try_talk(player)
+                    if resp:
+                        key = npc.name.lower()
+                        story[key].text = resp
+                        draw_scene_text(key)
+                        talked = True
+                        break
+                if not talked:
+                    for key, rect in triggers.items():
+                        if player.colliderect(rect): draw_scene_text(key); break
+        elif mode == 'narrative' and e.type == pygame.KEYDOWN:
+            if pygame.K_1 <= e.key <= pygame.K_9:
+                idx = e.key - pygame.K_1
+                node = story[current_scene]
+                if idx < len(node.choices):
+                    _, dest = node.choices[idx]
+                    draw_scene_text(dest)
+            elif e.key == pygame.K_ESCAPE:
+                mode = 'world'
+
+    # Rendering
+    if mode == 'finale':
+        screen.fill((255,255,255))
+        end_surf = FONT.render("The End", True, (0,0,0))
+        screen.blit(end_surf, ((W-end_surf.get_width())//2, 50))
+        y = 120
+        for key in history:
+            txt = story[key].text
+            line_surf = FONT.render(txt, True, (0,0,0))
+            screen.blit(line_surf, (50, y)); y += 30
+    else:
+        screen.fill((100,200,100))
+        for y in range(0, H, TILE):
+            for x in range(0, W, TILE): pygame.draw.rect(screen, (50,180,50), (x,y,TILE,TILE), 1)
+        for rect in triggers.values(): pygame.draw.rect(screen, (200,200,50), rect)
+        for w in walls: screen.blit(wall_img, w.topleft)
+        screen.blit(player_img, player.topleft)
+        for npc in npcs: npc.update(walls); npc.draw(screen)
+        if mode=='narrative' and current_scene: draw_text_box()
+
+    pygame.display.flip()
+    clock.tick(FPS)
+
+pygame.quit()
+sys.exit()
